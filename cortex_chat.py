@@ -1,6 +1,6 @@
 import requests
 import json
-import generate_jwt
+# import generate_jwt
 from generate_jwt import JWTGenerator
 
 # Keep DEBUG=True for testing the changes
@@ -9,7 +9,6 @@ DEBUG = True
 class CortexChat:
     def __init__(self,
             agent_url: str,
-            # Removed search_service parameter
             semantic_model: str,
             model: str,
             account: str,
@@ -18,7 +17,6 @@ class CortexChat:
         ):
         self.agent_url = agent_url
         self.model = model
-        # Removed self.search_service assignment
         self.semantic_model = semantic_model
         self.account = account
         self.user = user
@@ -48,13 +46,6 @@ class CortexChat:
             }
             ],
             "tools": [
-                # Removed the cortex_search tool spec
-                # {
-                #     "tool_spec": {
-                #         "type": "cortex_search",
-                #         "name": "vehicles_info_search"
-                #     }
-                # },
                 { # Kept only the cortex_analyst tool spec
                     "tool_spec": {
                         "type": "cortex_analyst_text_to_sql",
@@ -64,14 +55,6 @@ class CortexChat:
                 }
             ],
             "tool_resources": {
-                # Removed the vehicles_info_search resource
-                # "vehicles_info_search": {
-                #     "name": self.search_service, # self.search_service removed
-                #     "max_results": limit, # limit removed
-                #     "title_column": "title",
-                #     "id_column": "relative_path",
-                # },
-                 # Kept only the analyst tool resource, ensure the key matches the tool name above
                 "sql_analyst_tool": {
                     "semantic_model_file": self.semantic_model
                 }
@@ -154,15 +137,14 @@ class CortexChat:
             print(f"Error processing SSE line: {e} - Line: {line}")
             return {'type': 'error', 'message': f'Processing error: {e}'}
 
-
-    def _parse_response(self,response: requests.Response) -> dict[str, any]:
-        """Parse the SSE chat response, focusing on text and SQL from the analyst tool."""
+    def _parse_response(self, response: requests.Response) -> dict[str, any]:
+        """Parse the SSE chat response, extracting text, SQL, and suggestions."""
         accumulated = {
             'text': '',
             'tool_use': [],
             'tool_results': [],
             'other': [],
-            'errors': [] # Added list to collect errors
+            'errors': []
         }
 
         for line in response.iter_lines():
@@ -171,54 +153,59 @@ class CortexChat:
                 result = self._process_sse_line(decoded_line)
 
                 if result.get('type') == 'message':
-                    content = result['content']
-                    accumulated['text'] += content['text']
-                    accumulated['tool_use'].extend(content['tool_use'])
-                    accumulated['tool_results'].extend(content['tool_results'])
+                    content_data = result['content'] # Renamed 'content' to 'content_data' to avoid confusion
+                    accumulated['text'] += content_data['text']
+                    accumulated['tool_use'].extend(content_data['tool_use'])
+                    accumulated['tool_results'].extend(content_data['tool_results'])
                 elif result.get('type') == 'other':
                     accumulated['other'].append(result['data'])
-                elif result.get('type') == 'error': # Collect errors found during SSE processing
+                elif result.get('type') == 'error':
                     accumulated['errors'].append(result.get('data') or result.get('message'))
 
-
-        text = ''
+        # Initialize what we want to return
+        final_text = accumulated.get('text', '') # General text from LLM
         sql = ''
-        # Removed citations variable
-
-        if accumulated['text']:
-            text = accumulated['text']
+        suggestions_list = [] # Initialize as an empty list
+        text_accompanying_suggestions = ''
 
         if DEBUG:
-            print("\n=== Parsed Accumulated Data ===")
-            print(f"Text: {accumulated['text']}")
-            print(f"Tool Use: {json.dumps(accumulated['tool_use'], indent=2)}")
-            print(f"Tool Results: {json.dumps(accumulated['tool_results'], indent=2)}")
-            print(f"Other: {json.dumps(accumulated['other'], indent=2)}")
-            print(f"Errors: {json.dumps(accumulated['errors'], indent=2)}") # Print collected errors
-            print("--- End Parsed Accumulated Data ---")
+            print("\n=== Parsed Accumulated Data (in _parse_response) ===")
+            # ... (your existing debug prints for accumulated data) ...
 
-        # Simplified parsing for SQL, assuming it comes within 'tool_results'
         if accumulated['tool_results']:
-             for result in accumulated['tool_results']: # Example: result = {'tool_use_id': '...', 'content': [{'type': 'tool_results', 'json': {'sql': '...'}}]}
-                if 'content' in result and isinstance(result['content'], list):
-                    for content_item in result['content']:
-                         # Check if content_item is a dict and has 'json' which also has 'sql'
-                        if isinstance(content_item, dict) and 'json' in content_item and isinstance(content_item['json'], dict) and 'sql' in content_item['json']:
-                            sql = content_item['json']['sql']
-                            # Since we only expect SQL, we can break once found, unless multiple SQL results are possible/expected.
-                            # break # Optional: break if you only expect one SQL result
+            for tool_result_item in accumulated['tool_results']:
+                if 'content' in tool_result_item and isinstance(tool_result_item['content'], list):
+                    for content_block in tool_result_item['content']:
+                        if isinstance(content_block, dict) and 'json' in content_block and \
+                           isinstance(content_block['json'], dict):
+                            
+                            # Extract SQL
+                            if 'sql' in content_block['json']:
+                                sql = content_block['json']['sql']
 
-        # If errors were found during parsing, print them clearly
+                            # Extract Suggestions and their accompanying text
+                            if 'suggestions' in content_block['json'] and \
+                               isinstance(content_block['json']['suggestions'], list):
+                                suggestions_list.extend(content_block['json']['suggestions'])
+                                if 'text' in content_block['json']:
+                                    text_accompanying_suggestions = content_block['json']['text']
+
+        # Logic to decide the primary 'text' to return:
+        # If suggestions are present and have specific accompanying text, that text might be more relevant.
+        if text_accompanying_suggestions:
+            final_text = text_accompanying_suggestions # Prioritize text that came with suggestions
+        elif not sql and not suggestions_list and not final_text: # If everything is empty, but tool use happened
+            if accumulated['tool_use'] and not accumulated['errors']:
+                 final_text = "I used my tools but didn't find a specific answer or SQL query."
+
+
         if accumulated['errors']:
             print("\n--- ERRORS DETECTED DURING RESPONSE PARSING ---")
-            for error in accumulated['errors']:
-                print(error)
-            print("--- END ERRORS ---")
-            # Depending on requirements, you might want to return an error indicator or empty results
-            # return {"text": "Error during processing", "sql": ""}
+            # ... (error printing logic) ...
+            # Potentially override final_text if there's a critical error
+            # final_text = "An error occurred while processing the response."
 
-        # Return only text and sql
-        return {"text": text, "sql": sql}
+        return {"text": final_text, "sql": sql, "suggestions": suggestions_list}
 
     def chat(self, query: str) -> dict[str, any]:
         # Added error handling for the case where _retrieve_response returns None
