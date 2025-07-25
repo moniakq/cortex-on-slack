@@ -84,20 +84,6 @@ class CortexChat:
             },
         }
         response = requests.post(self.agent_url, headers=headers, json=data)
-        ## Orig
-        # request_body = {
-        #     "model": self.model,
-        #     "messages": [
-        #         {"role": "user", "content": [{"type": "text", "text": query}]},
-        #     ],
-        #     "tools": [
-        #         {"tool_spec": {"type": "cortex_analyst_text_to_sql", "name": "Analyst1"}},
-        #     ],
-        #     "tool_resources": {
-        #         "Analyst1": {"semantic_model_file": self.semantic_model},
-        #     },
-        # }
-        # response = requests.post(self.agent_url, headers=headers, data=json.dumps(request_body))
 
         self.logger.debug(f"--- Raw API Response Status Code: {response.status_code} ---")
         response_text_to_log = response.text[:1000] + ("..." if len(response.text) > 1000 else "")
@@ -164,7 +150,6 @@ class CortexChat:
         self.logger.debug(f"Accumulated Text: {accumulated['text']}")
         self.logger.debug(f"Accumulated Tool Use: {json.dumps(accumulated['tool_use'], indent=2)}")
         self.logger.debug(f"Accumulated Tool Results: {json.dumps(accumulated['tool_results'], indent=2)}")
-        # self.logger.debug(f"Accumulated Other: {json.dumps(accumulated['other'], indent=2)}") # Can be verbose
         self.logger.debug(f"Accumulated Errors in Stream: {json.dumps(accumulated['errors'], indent=2)}")
         self.logger.debug("--- End Accumulated Data ---")
 

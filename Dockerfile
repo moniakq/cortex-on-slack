@@ -1,15 +1,15 @@
 FROM python:3.10-slim-buster
 WORKDIR /app
 
-COPY app_local.py ./
-COPY cortex_chat.py ./
+COPY app_docker.py ./
+COPY cortex_chat_docker.py ./
 COPY generate_jwt.py ./
 COPY requirements.txt ./
 COPY rsa_key.p8 ./
 COPY rsa_key.pub ./
-COPY .env ./
+#COPY .env ./
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
-CMD ["python3", "app_local.py"]
+CMD ["python3", "app_docker.py"]
