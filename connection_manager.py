@@ -6,7 +6,7 @@ import snowflake.connector
 class SnowflakeConnectionManager:
     """A thread-safe class to manage and refresh Snowflake connections."""
 
-    def __init__(self, logger, max_age_hours=4):
+    def __init__(self, logger, max_age_hours=4, initial_connection=None):
         self.log = logger
         self.log.info(f"Connection manager initialized with a max age of {max_age_hours} hours.")
         
@@ -18,9 +18,16 @@ class SnowflakeConnectionManager:
         self.role = os.getenv("ROLE")
         self.database = os.getenv("DATABASE")
         self.schema = os.getenv("SCHEMA")
-
         self._connection = None
         self._connection_timestamp = None
+
+        if initial_connection:
+            self._connection = initial_connection
+            self._connection_timestamp = datetime.now()
+        else:
+            self._connection = None
+            self._connection_timestamp = None
+        
         self._lock = threading.Lock()
         self.max_age = timedelta(hours=max_age_hours)
 

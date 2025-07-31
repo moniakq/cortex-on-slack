@@ -14,6 +14,7 @@ from flask import Flask
 import time
 from slack_sdk.errors import SlackApiError
 from connection_manager import SnowflakeConnectionManager
+import requests
 
 matplotlib.use('Agg')
 
@@ -319,28 +320,49 @@ def plot_chart(df):
     return img_url
 
 def init():
-    log.info("SPCS environment detected. Attempting connection with OAuth token.")
+    log.info("SPCS environment detected. Initializing with OAuth token...")
 
-    # 1. Create the connection manager instance from the imported class
-    # Pass the logger to the manager's constructor
-    conn_manager = SnowflakeConnectionManager(logger=log, max_age_hours=4)
+    # --- Create the initial connection for the Connection Manager ---
+    # This part is for the pandas queries, not for CortexChat.
+    if not os.path.exists(SPCS_TOKEN_FILE):
+        raise FileNotFoundError(f"SPCS token file not found at {SPCS_TOKEN_FILE}.")
+    with open(SPCS_TOKEN_FILE, 'r') as f:
+        token = f.read()
 
-    # Setup CortexChat Instance - This still requires JWT credentials for its own API calls.
-    cortex_vars = [AGENT_ENDPOINT, SEMANTIC_MODEL, MODEL, token]
-    if not all(cortex_vars):
-        missing = [name for name, val in zip(
-            ["AGENT_ENDPOINT", "SEMANTIC_MODEL", "MODEL", "SPCS Token"],
-            cortex_vars
-        ) if not val]
-        raise ValueError(f"Missing variables for CortexChat: {missing}")
+    try:
+        initial_conn = snowflake.connector.connect(
+            authenticator='oauth',
+            token=token,
+            account=SNOWFLAKE_ACCOUNT,
+            host=SNOWFLAKE_HOST,
+            warehouse=WAREHOUSE,
+            role=ROLE,
+            database=DATABASE,
+            schema=SCHEMA
+        )
+        log.info("Initial Snowflake OAuth connection for pandas queries successful.")
+    except Exception as e:
+        log.critical(f"Fatal error creating initial Snowflake connection: {e}")
+        raise
 
+    # --- Initialize services ---
+
+    # 1. Initialize the Connection Manager with the first connection.
+    # This is still the correct approach for handling the connection used by pandas.
+    conn_manager = SnowflakeConnectionManager(logger=log, initial_connection=initial_conn)
+    log.info("Connection Manager initialized.")
+
+    # 2. Initialize CortexChat as it was originally designed.
+    # It does NOT take a connection object. It will get the token from the file itself.
+    log.info("Initializing CortexChat instance...")
     cortex_app_instance = cortex_chat_docker.CortexChat(
         agent_url=AGENT_ENDPOINT,
         semantic_model=SEMANTIC_MODEL,
         model=MODEL,
-        logger=log,
+        logger=log
     )
-    log.info(">>>>>>>>>> Init complete (Snowflake connection and CortexChat).")
+    
+    log.info(">>>>>>>>>> Init complete.")
     return conn_manager, cortex_app_instance
 
 # Slack Socket Mode App

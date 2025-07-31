@@ -13,6 +13,7 @@ from threading import Thread
 from flask import Flask
 import time
 from slack_sdk.errors import SlackApiError
+import requests
 
 matplotlib.use('Agg')
 
