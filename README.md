@@ -93,4 +93,3 @@ There are three different ways to run the message broker:
     ```
     
     A connection manager class has been added to manage the authentication in Snowflake. The manager has implemented a token auto refresh method.
-    ```
