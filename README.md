@@ -89,7 +89,8 @@ There are three different ways to run the message broker:
     $$
       EXTERNAL_ACCESS_INTEGRATIONS = (slack_integration)
       MIN_INSTANCES = 1
-
-    A connection manager class has been added to manage the authentication in Snowflake. The manager has implemented a token auto refresh method.
       MAX_INSTANCES = 2;
+    ```
+    
+    A connection manager class has been added to manage the authentication in Snowflake. The manager has implemented a token auto refresh method.
     ```
