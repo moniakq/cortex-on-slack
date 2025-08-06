@@ -85,6 +85,9 @@ class CortexChat:
         }
         response = requests.post(self.agent_url, headers=headers, json=data)
 
+        request_id = response.headers.get('X-Snowflake-Request-Id', 'Not Found')
+        self.logger.debug(f"---- Agent Request ID: {request_id} -------")
+
         self.logger.debug(f"--- Raw API Response Status Code: {response.status_code} ---")
         response_text_to_log = response.text[:1000] + ("..." if len(response.text) > 1000 else "")
         self.logger.debug(f"--- Raw API Response Text: {response_text_to_log} ---")
@@ -181,7 +184,13 @@ class CortexChat:
             self.logger.error(f"Errors detected during SSE response parsing: {accumulated['errors']}")
             # Consider if final_text should indicate an error here
             # final_text += " (An error occurred during response processing)"
-
+        
+        if final_text.strip().lower().startswith("i apologize"):
+            self.logger.info("Detected 'I apologize' response. Replacing with custom message and link.")
+            streamlit_app_url = "https://app.snowflake.com/rea28857/fanatics_collectibles_prod/#/streamlit-apps/FL_DATA_PROD.ML_DM.Q7WKFMFD8TSJT4YG?ref=snowsight_shared"
+            final_text = f"I apologize, but I cannot provide a complete response, please visit the <{streamlit_app_url}|Fanatics analyst> on snowflake and continue there."
+            sql = ''
+            suggestions_list = []
 
         self.logger.info(f"Returning from _parse_response. Final Text: '{final_text[:100]}...', SQL: '{sql[:100]}...', Suggestions Count: {len(suggestions_list)}")
         return {"text": final_text, "sql": sql, "suggestions": suggestions_list}

@@ -92,8 +92,26 @@ def send_dataframe_as_csv(df, channel_id, initial_comment, prompt):
 def handle_message_events(ack, body, say):
     try:
         ack()
-        prompt = body['event']['text']
+        original_prompt = body['event']['text']
         channel_id = body['event']['channel']
+
+        clean_prompt = original_prompt
+        commands = {
+            "/sql": False,
+            "/img": False
+        }
+
+        for cmd, _ in commands.items():
+            if cmd in clean_prompt:
+                commands[cmd] = True
+                clean_prompt = clean_prompt.replace(cmd, "") # Remove command from prompt
+
+        clean_prompt = clean_prompt.strip()
+
+        # Set flags from the parsed commands
+        show_sql = commands["/sql"]
+        show_img = commands["/img"]
+
         say(
             text = "Snowflake Cortex AI is generating a response",
             blocks=[
@@ -112,14 +130,9 @@ def handle_message_events(ack, body, say):
                 },
             ]
         )
-        # 1. Initialize a flag to control SQL visibility
-        show_sql = False
-        # 2. Check for the /sql command
-        if prompt.strip().endswith("/sql"):
-            show_sql = True
-            prompt = prompt.strip()[:-4].strip()
-        response = ask_agent(prompt)
-        display_agent_response(response, say, channel_id, show_sql, prompt)
+        
+        response = ask_agent(clean_prompt)
+        display_agent_response(response, say, channel_id, show_sql, show_img, original_prompt)
     except Exception as e:
         error_info = f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}"
         log.error(error_info)
@@ -129,7 +142,7 @@ def ask_agent(prompt):
     resp = CORTEX_APP.chat(prompt)
     return resp
 
-def display_agent_response(content, say, channel_id, show_sql, prompt):
+def display_agent_response(content, say, channel_id, show_sql, show_img, prompt):
     # This function is now much cleaner
     has_displayed_primary_content = False
 
@@ -169,22 +182,8 @@ def display_agent_response(content, say, channel_id, show_sql, prompt):
                 blocks=[{"type": "rich_text", "elements": sql_blocks_elements}]
             )
 
-            if df is not None and len(df.columns) > 1:
-                chart_img_url = None # Reset for safety
-                try:
-                    chart_img_url = plot_chart(df) # plot_chart should handle its own errors or return None
-                except Exception as e:
-                    chart_error_info = f"{type(e).__name__} at line {e.__traceback__.tb_lineno} of {__file__}: {e}"
-                    log.error(f"Warning: Data likely not suitable for displaying as a chart. {chart_error_info}")
-                if chart_img_url:
-                    say(
-                        text = "Chart",
-                        blocks=[{
-                            "type": "image", "title": {"type": "plain_text", "text": "Chart"},
-                            "block_id": "image_" + str(time.time()), # Unique block_id
-                            "image_url": chart_img_url, "alt_text": "Generated Chart"
-                        }]
-                    )
+            if df is not None and show_img and len(df.columns) > 1:
+                plot_chart(df, channel_id, prompt, say)
 
         except SlackApiError as e:
             if e.response["error"] == "msg_blocks_too_long":
@@ -256,16 +255,18 @@ def display_agent_response(content, say, channel_id, show_sql, prompt):
 
     # 3. Handle plain text responses (if no SQL and no suggestions were found/displayed)
     elif not has_displayed_primary_content and content.get('text'):
-        # This 'text' is the general LLM response if no tools (SQL/suggestions) were effectively used or parsed.
+    # This block now correctly handles the custom message with the markdown link
         say(
-            text="Answer:",
-            blocks=[{
-                "type": "rich_text",
-                "elements": [{
-                    "type": "rich_text_quote",
-                    "elements": [{"type": "text", "text": f"Answer: {content['text']}", "style": {"bold": True}}]
-                }]
-            }]
+            text="Answer:",  # Fallback text for notifications
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": content['text']  # The text already contains the full message and markdown link
+                    }
+                }
+            ]
         )
         has_displayed_primary_content = True
 
@@ -273,51 +274,134 @@ def display_agent_response(content, say, channel_id, show_sql, prompt):
     if not has_displayed_primary_content:
         say(text="I received a response, but couldn't find specific information to display.")
         log.info(f"Debug: Unhandled content structure in display_agent_response: {content}")
-
-def plot_chart(df):
-    plt.figure(figsize=(10, 6), facecolor='#333333')
-
-    # plot pie chart with percentages, using dynamic column names
-    plt.pie(df[df.columns[1]], 
-            labels=df[df.columns[0]], 
-            autopct='%1.1f%%', 
-            startangle=90, 
-            colors=['#1f77b4', '#ff7f0e'], 
-            textprops={'color':"white",'fontsize': 16})
-
-    # ensure equal aspect ratio
-    plt.axis('equal')
-    # set the background color for the plot area to dark as well
-    plt.gca().set_facecolor('#333333')   
-    plt.tight_layout()
-
-    # save the chart as a .jpg file
-    file_path_jpg = 'pie_chart.jpg'
-    plt.savefig(file_path_jpg, format='jpg')
-    file_size = os.path.getsize(file_path_jpg)
-
-    # upload image file to slack
-    file_upload_url_response = app.client.files_getUploadURLExternal(filename=file_path_jpg,length=file_size)
-    if DEBUG:
-        log.info(file_upload_url_response)
-    file_upload_url = file_upload_url_response['upload_url']
-    file_id = file_upload_url_response['file_id']
-    with open(file_path_jpg, 'rb') as f:
-        response = requests.post(file_upload_url, files={'file': f})
-
-    # check the response
-    img_url = None
-    if response.status_code != 200:
-        log.error("File upload failed", response.text)
-    else:
-        # complete upload and get permalink to display
-        response = app.client.files_completeUploadExternal(files=[{"id":file_id, "title":"chart"}])
-        if DEBUG:
-            log.info(response)
-        img_url = response['files'][0]['permalink']
-        time.sleep(2)
+        
+def plot_chart(df, channel_id, prompt, say):
+    """
+    Analyzes the DataFrame and generates the most appropriate plot (line, bar, pie, or scatter).
+    Then, it posts the plot directly to the specified Slack channel.
+    """
+    log.info(f"Attempting to generate a dynamic chart for the prompt: '{prompt}'")
     
-    return img_url
+    # Convert date-like columns
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            try:
+                # Attempt to convert to datetime.
+                df[col] = pd.to_datetime(df[col])
+                log.info(f"Successfully converted column '{col}' to datetime.")
+            except (ValueError, TypeError):
+                pass
+
+    plot_created = False
+    
+    # 1. Analyze DataFrame columns with their NEW data types
+    numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
+    datetime_cols = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+    string_cols = [col for col in df.columns if pd.api.types.is_string_dtype(df[col])]
+    
+    # 2. Apply Heuristics to Choose a Plot Type
+    plt.style.use('seaborn-v0_8-darkgrid')
+    plt.figure(figsize=(12, 7))
+
+    # Rule 1: Time-Series Line Plot
+    if len(datetime_cols) == 1 and len(numeric_cols) >= 1:
+        log.info("Rule matched: Time-Series. Creating Line Plot.")
+        x_ax, y_ax = datetime_cols[0], numeric_cols[0]
+        plt.plot(df[x_ax], df[y_ax], marker='o', linestyle='-')
+        plt.xlabel(x_ax.replace('_', ' ').title())
+        plt.ylabel(y_ax.replace('_', ' ').title())
+        plt.title(f"Time-Series Analysis: {y_ax.replace('_', ' ').title()}")
+        plt.xticks(rotation=45)
+        plot_created = True
+
+    # ... (the rest of your bar, pie, and scatter plot rules remain the same) ...
+    elif len(string_cols) == 1 and len(numeric_cols) == 1 and (2 <= df[string_cols[0]].nunique() <= 7):
+        log.info("Rule matched: Few Categories. Creating Pie Chart.")
+        labels_col, values_col = string_cols[0], numeric_cols[0]
+        plt.pie(df[values_col], labels=df[labels_col], autopct='%1.1f%%', startangle=140)
+        plt.title(f"Distribution of {values_col.replace('_', ' ').title()} by {labels_col.replace('_', ' ').title()}")
+        plt.axis('equal')
+        plot_created = True
+        
+    elif len(string_cols) == 1 and len(numeric_cols) >= 1:
+        log.info("Rule matched: Categorical. Creating Bar Chart.")
+        x_ax, y_ax = string_cols[0], numeric_cols[0]
+        plt.bar(df[x_ax], df[y_ax])
+        plt.xlabel(x_ax.replace('_', ' ').title())
+        plt.ylabel(y_ax.replace('_', ' ').title())
+        plt.title(f"{y_ax.replace('_', ' ').title()} by {x_ax.replace('_', ' ').title()}")
+        plt.xticks(rotation=45, ha='right')
+        plot_created = True
+
+    elif len(numeric_cols) >= 2:
+        log.info("Rule matched: Two Numerics. Creating Scatter Plot.")
+        x_ax, y_ax = numeric_cols[0], numeric_cols[1]
+        plt.scatter(df[x_ax], df[y_ax])
+        plt.xlabel(x_ax.replace('_', ' ').title())
+        plt.ylabel(y_ax.replace('_', ' ').title())
+        plt.title(f"Relationship between {x_ax.replace('_', ' ').title()} and {y_ax.replace('_', ' ').title()}")
+        plot_created = True
+
+    # 3. Save, Upload, and Cleanup (if a plot was created)
+    if plot_created:
+        plt.tight_layout()
+        file_path_jpg = 'chart.jpg'
+        plt.savefig(file_path_jpg, format='jpg')
+        plt.close()
+
+        try:
+            app.client.files_upload_v2(
+                channel=channel_id,
+                file=file_path_jpg,
+                title=f"Chart for: {prompt}",
+                initial_comment="Here is a chart generated from your query."
+            )
+            log.info(f"Successfully uploaded chart for prompt '{prompt}' to channel {channel_id}")
+        except SlackApiError as e:
+            log.error(f"Failed to upload chart to Slack: {e.response['error']}")
+            app.client.chat_postMessage(channel=channel_id, text=f"Sorry, I couldn't upload the chart. Error: `{e.response['error']}`")
+        finally:
+            if os.path.exists(file_path_jpg):
+                os.remove(file_path_jpg)
+    else:
+        log.warning("Could not determine a suitable chart type for the given data. No chart was created.")
+        # Now this 'say' call will work correctly because it's passed in
+        say(text="I analyzed the data but couldn't determine a suitable chart type to create.")
+
+# This function will now post directly to Slack and return True/False on success
+# def plot_chart(df, channel_id, prompt):
+#     # --- Matplotlib plotting logic is the same ---
+#     plt.figure(figsize=(10, 6), facecolor='#333333')
+#     plt.pie(df[df.columns[1]], 
+#             labels=df[df.columns[0]], 
+#             autopct='%1.1f%%', 
+#             startangle=90, 
+#             colors=['#1f77b4', '#ff7f0e'], 
+#             textprops={'color':"white",'fontsize': 16})
+#     plt.axis('equal')
+#     plt.gca().set_facecolor('#333333')   
+#     plt.tight_layout()
+#     file_path_jpg = 'pie_chart.jpg'
+#     plt.savefig(file_path_jpg, format='jpg')
+#     plt.close() # Good practice to free up memory
+
+#     # --- Simplified Slack Upload using files_upload_v2 ---
+#     try:
+#         app.client.files_upload_v2(
+#             channel=channel_id,
+#             file=file_path_jpg,
+#             title=f"Chart for: {prompt}",
+#             initial_comment="Here's the chart you requested."
+#         )
+#         log.info(f"Successfully uploaded chart for prompt '{prompt}' to channel {channel_id}")
+#     except SlackApiError as e:
+#         log.error(f"Failed to upload chart to Slack: {e.response['error']}")
+#         # Optionally send a message back to the user about the failure
+#         app.client.chat_postMessage(channel=channel_id, text=f"Sorry, I couldn't upload the chart. Error: `{e.response['error']}`")
+#     finally:
+#         # Always clean up the local file
+#         if os.path.exists(file_path_jpg):
+#             os.remove(file_path_jpg)
 
 def init():
     log.info("SPCS environment detected. Initializing with OAuth token...")
