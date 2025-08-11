@@ -1,10 +1,3 @@
-"""
-This module implements a Slack bot that interacts with the Snowflake Cortex API.
-
-This script sets up a Slack bot that listens for messages, sends them to the
-Cortex API, and then formats and displays the response in Slack. It can handle
-text, SQL queries, and image charts.
-"""
 import os
 import logging
 import sys
@@ -27,6 +20,7 @@ matplotlib.use('Agg')
 
 # --- Environment Variables ---
 # These must be set in your Snowflake Service Specification YAML (as env vars or secrets)
+# For the main SPCS DB connection
 SPCS_TOKEN_FILE = "/snowflake/session/token"
 SNOWFLAKE_HOST = os.getenv("SNOWFLAKE_HOST")
 SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
@@ -39,21 +33,22 @@ ROLE = os.getenv("ROLE")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 
-# For the CortexChat class API calls
+# For the CortexChat class API calls (requires JWT authentication)
 USER = os.getenv("USER")
-ACCOUNT = os.getenv("ACCOUNT")
+ACCOUNT = os.getenv("ACCOUNT") # Note: This might be the same as SNOWFLAKE_ACCOUNT
+RSA_PRIVATE_KEY_PATH = os.getenv("RSA_PRIVATE_KEY_PATH") # Path to key file INSIDE the container
 AGENT_ENDPOINT = f"https://{SNOWFLAKE_HOST}/api/v2/cortex/agent:run"
+# AGENT_ENDPOINT = f"https://{SNOWFLAKE_HOST}/api/v2/cortex/analyst/message"
 SEMANTIC_MODEL = os.getenv("SEMANTIC_MODEL")
 MODEL = os.getenv("MODEL")
 
 DEBUG = True
 
-# Initializes the Slack app
+# Initializes app
 app = App(token=SLACK_BOT_TOKEN)
 messages = []
 
 def get_logger():
-    """Initializes and returns a logger instance."""
     logger = logging.getLogger("cortex-analyst-slack-spcs")
     logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler(sys.stdout)
@@ -67,15 +62,7 @@ log = get_logger()
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 def send_dataframe_as_csv(df, channel_id, initial_comment, prompt):
-    """
-    Saves a DataFrame to a CSV file and uploads it to Slack.
-
-    Args:
-        df: The pandas DataFrame to save.
-        channel_id: The ID of the Slack channel to upload the file to.
-        initial_comment: The initial comment to post with the file.
-        prompt: The original user prompt that generated the DataFrame.
-    """
+    """Saves a DataFrame to a CSV and uploads it to Slack."""
     if df.empty:
         app.client.chat_postMessage(
             channel=channel_id,
@@ -103,13 +90,6 @@ def send_dataframe_as_csv(df, channel_id, initial_comment, prompt):
 
 @app.event("message")
 def handle_message_events(ack, body, say):
-    """
-    Handles incoming messages from Slack.
-
-    This function is triggered when a message is posted in a channel the bot is in.
-    It parses the message for commands, sends the prompt to the Cortex API, and
-    displays the response.
-    """
     try:
         ack()
         original_prompt = body['event']['text']
@@ -159,20 +139,14 @@ def handle_message_events(ack, body, say):
         say(text = "Request failed...",blocks=[{"type": "divider"},{"type": "section","text": {"type": "plain_text","text": f"{error_info}",}},{"type": "divider"},])
 
 def ask_agent(prompt):
-    """Sends a prompt to the Cortex API and returns the response."""
     resp = CORTEX_APP.chat(prompt)
     return resp
 
 def display_agent_response(content, say, channel_id, show_sql, show_img, prompt):
-    """
-    Displays the agent's response in Slack.
-
-    This function formats the response from the Cortex API and displays it in
-    Slack. It can handle text, SQL, and suggestions.
-    """
+    # This function is now much cleaner
     has_displayed_primary_content = False
 
-    # Handle SQL content
+    # 1. Handle SQL content (if any)
     if content.get('sql'):
         sql = content['sql']
         df = None
@@ -195,23 +169,28 @@ def display_agent_response(content, say, channel_id, show_sql, show_img, prompt)
             sql_blocks_elements.append({"type": "rich_text_preformatted", "elements": [{"type": "text", "text": f"SQL:\n{sql}"}]})
 
         if df is not None:
+            # Add the results to the blocks list. This might be very long.
             sql_blocks_elements.append({"type": "rich_text_preformatted", "elements": [{"type": "text", "text": f"\nResults:\n{df.to_string()}"}]})
         elif sql_execution_error:
             sql_blocks_elements.append({"type": "rich_text_preformatted", "elements": [{"type": "text", "text": f"\nError:\n{sql_execution_error}"}]})
         
         try:
-            # Try to send the results as a normal message
+            # First, TRY to send the results as a normal message
             say(
                 text="SQL Query and Results",
                 blocks=[{"type": "rich_text", "elements": sql_blocks_elements}]
             )
 
+            # if df is not None and show_img and len(df.columns) > 1:
+            #     plot_chart(df, channel_id, prompt, say)
+
         except SlackApiError as e:
             if e.response["error"] == "msg_blocks_too_long":
                 log.info("Message too long. Handling with fallback...")
-                file_comment = "" 
+                file_comment = "" # Initialize the comment for the file upload
+                # First, check if the user requested the SQL
                 if show_sql:
-                    # Send a separate message with just the SQL query
+                    # Send a separate, smaller message with JUST the SQL query
                     say(
                         text=f"SQL for your query: {prompt}",
                         blocks=[
@@ -228,8 +207,10 @@ def display_agent_response(content, say, channel_id, show_sql, show_img, prompt)
                             }
                         ]
                     )
+                    # Prepare a follow-up comment for the file
                     file_comment = "Here are the full results in the attached CSV file."
                 else:
+                    # If /sql was not used, the comment should be more descriptive
                     file_comment = f"The results for your query, '{prompt}', were too long to display directly. Here they are in the attached file."
                 send_dataframe_as_csv(df, channel_id, file_comment, prompt)
             else:
@@ -237,19 +218,24 @@ def display_agent_response(content, say, channel_id, show_sql, show_img, prompt)
                 say(text=f"Sorry, I couldn't send the response due to a Slack error: `{e.response['error']}`")
 
         if df is not None and show_img and len(df.columns) > 1:
+            # The plot_chart function handles everything: creating, uploading, and posting.
             plot_chart(df, channel_id, prompt, say) 
 
         has_displayed_primary_content = True
 
-    # Handle Suggestions
+    # 2. Handle Suggestions (if any)
+    # This can be displayed even if SQL was present, or if SQL was not.
+    # The `content['text']` here is the one prepared by _parse_response,
+    # potentially the text that accompanied the suggestions.
     if content.get('suggestions'):
         suggestions_list = content['suggestions']
         
         suggestion_display_blocks = []
         
+        # Add the introductory text if it exists and is relevant (especially if no SQL was shown)
         if content.get('text'):
              suggestion_display_blocks.append({
-                "type": "rich_text_section",
+                "type": "rich_text_section", # Or preformatted if it contains newlines
                 "elements": [{"type": "text", "text": f"{content['text']}"}]
             })
 
@@ -268,38 +254,34 @@ def display_agent_response(content, say, channel_id, show_sql, show_img, prompt)
             text="Suggestions available",
             blocks=[{"type": "rich_text", "elements": suggestion_display_blocks}]
         )
-        has_displayed_primary_content = True
+        has_displayed_primary_content = True # Mark that suggestions were primary or additional content
 
-    # Handle plain text responses
+    # 3. Handle plain text responses (if no SQL and no suggestions were found/displayed)
     elif not has_displayed_primary_content and content.get('text'):
+    # This block now correctly handles the custom message with the markdown link
         say(
-            text="Answer:",
+            text="Answer:",  # Fallback text for notifications
             blocks=[
                 {
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": content['text']
+                        "text": content['text']  # The text already contains the full message and markdown link
                     }
                 }
             ]
         )
         has_displayed_primary_content = True
 
-    # If nothing meaningful was found in content to display
+    # 4. If nothing meaningful was found in content to display
     if not has_displayed_primary_content:
         say(text="I received a response, but couldn't find specific information to display.")
         log.info(f"Debug: Unhandled content structure in display_agent_response: {content}")
         
 def plot_chart(df, channel_id, prompt, say):
     """
-    Analyzes the DataFrame and generates the most appropriate plot, then posts it to Slack.
-
-    Args:
-        df: The pandas DataFrame to plot.
-        channel_id: The ID of the Slack channel to upload the plot to.
-        prompt: The original user prompt that generated the DataFrame.
-        say: The Slack `say` function.
+    Analyzes the DataFrame and generates the most appropriate plot (line, bar, pie, or scatter).
+    Then, it posts the plot directly to the specified Slack channel.
     """
     log.info(f"Attempting to generate a dynamic chart for the prompt: '{prompt}'")
     
@@ -307,6 +289,7 @@ def plot_chart(df, channel_id, prompt, say):
     for col in df.columns:
         if df[col].dtype == 'object':
             try:
+                # Attempt to convert to datetime.
                 df[col] = pd.to_datetime(df[col])
                 log.info(f"Successfully converted column '{col}' to datetime.")
             except (ValueError, TypeError):
@@ -314,11 +297,12 @@ def plot_chart(df, channel_id, prompt, say):
 
     plot_created = False
     
-    # Analyze DataFrame columns to choose a plot type
+    # 1. Analyze DataFrame columns with their NEW data types
     numeric_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
     datetime_cols = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
     string_cols = [col for col in df.columns if pd.api.types.is_string_dtype(df[col])]
     
+    # 2. Apply Heuristics to Choose a Plot Type
     plt.style.use('seaborn-v0_8-darkgrid')
     plt.figure(figsize=(12, 7))
 
@@ -333,7 +317,7 @@ def plot_chart(df, channel_id, prompt, say):
         plt.xticks(rotation=45)
         plot_created = True
 
-    # Rule 2: Pie Chart for few categories
+    # ... (the rest of your bar, pie, and scatter plot rules remain the same) ...
     elif len(string_cols) == 1 and len(numeric_cols) == 1 and (2 <= df[string_cols[0]].nunique() <= 7):
         log.info("Rule matched: Few Categories. Creating Pie Chart.")
         labels_col, values_col = string_cols[0], numeric_cols[0]
@@ -342,7 +326,6 @@ def plot_chart(df, channel_id, prompt, say):
         plt.axis('equal')
         plot_created = True
         
-    # Rule 3: Bar Chart for categorical data
     elif len(string_cols) == 1 and len(numeric_cols) >= 1:
         log.info("Rule matched: Categorical. Creating Bar Chart.")
         x_ax, y_ax = string_cols[0], numeric_cols[0]
@@ -353,7 +336,6 @@ def plot_chart(df, channel_id, prompt, say):
         plt.xticks(rotation=45, ha='right')
         plot_created = True
 
-    # Rule 4: Scatter Plot for two numeric columns
     elif len(numeric_cols) >= 2:
         log.info("Rule matched: Two Numerics. Creating Scatter Plot.")
         x_ax, y_ax = numeric_cols[0], numeric_cols[1]
@@ -363,7 +345,7 @@ def plot_chart(df, channel_id, prompt, say):
         plt.title(f"Relationship between {x_ax.replace('_', ' ').title()} and {y_ax.replace('_', ' ').title()}")
         plot_created = True
 
-    # Save and upload the plot if one was created
+    # 3. Save, Upload, and Cleanup (if a plot was created)
     if plot_created:
         plt.tight_layout()
         file_path_jpg = 'chart.jpg'
@@ -386,12 +368,49 @@ def plot_chart(df, channel_id, prompt, say):
                 os.remove(file_path_jpg)
     else:
         log.warning("Could not determine a suitable chart type for the given data. No chart was created.")
+        # Now this 'say' call will work correctly because it's passed in
         say(text="I analyzed the data but couldn't determine a suitable chart type to create.")
 
+# This function will now post directly to Slack and return True/False on success
+# def plot_chart(df, channel_id, prompt):
+#     # --- Matplotlib plotting logic is the same ---
+#     plt.figure(figsize=(10, 6), facecolor='#333333')
+#     plt.pie(df[df.columns[1]], 
+#             labels=df[df.columns[0]], 
+#             autopct='%1.1f%%', 
+#             startangle=90, 
+#             colors=['#1f77b4', '#ff7f0e'], 
+#             textprops={'color':"white",'fontsize': 16})
+#     plt.axis('equal')
+#     plt.gca().set_facecolor('#333333')   
+#     plt.tight_layout()
+#     file_path_jpg = 'pie_chart.jpg'
+#     plt.savefig(file_path_jpg, format='jpg')
+#     plt.close() # Good practice to free up memory
+
+#     # --- Simplified Slack Upload using files_upload_v2 ---
+#     try:
+#         app.client.files_upload_v2(
+#             channel=channel_id,
+#             file=file_path_jpg,
+#             title=f"Chart for: {prompt}",
+#             initial_comment="Here's the chart you requested."
+#         )
+#         log.info(f"Successfully uploaded chart for prompt '{prompt}' to channel {channel_id}")
+#     except SlackApiError as e:
+#         log.error(f"Failed to upload chart to Slack: {e.response['error']}")
+#         # Optionally send a message back to the user about the failure
+#         app.client.chat_postMessage(channel=channel_id, text=f"Sorry, I couldn't upload the chart. Error: `{e.response['error']}`")
+#     finally:
+#         # Always clean up the local file
+#         if os.path.exists(file_path_jpg):
+#             os.remove(file_path_jpg)
+
 def init():
-    """Initializes the Snowflake connection and CortexChat instance."""
     log.info("SPCS environment detected. Initializing with OAuth token...")
 
+    # --- Create the initial connection for the Connection Manager ---
+    # This part is for the pandas queries, not for CortexChat.
     if not os.path.exists(SPCS_TOKEN_FILE):
         raise FileNotFoundError(f"SPCS token file not found at {SPCS_TOKEN_FILE}.")
     with open(SPCS_TOKEN_FILE, 'r') as f:
@@ -413,11 +432,15 @@ def init():
         log.critical(f"Fatal error creating initial Snowflake connection: {e}")
         raise
 
-    # Initialize the Connection Manager
+    # --- Initialize services ---
+
+    # 1. Initialize the Connection Manager with the first connection.
+    # This is still the correct approach for handling the connection used by pandas.
     conn_manager = SnowflakeConnectionManager(logger=log, initial_connection=initial_conn)
     log.info("Connection Manager initialized.")
 
-    # Initialize CortexChat
+    # 2. Initialize CortexChat as it was originally designed.
+    # It does NOT take a connection object. It will get the token from the file itself.
     log.info("Initializing CortexChat instance...")
     cortex_app_instance = cortex_chat_docker.CortexChat(
         agent_url=AGENT_ENDPOINT,
@@ -429,8 +452,8 @@ def init():
     log.info(">>>>>>>>>> Init complete.")
     return conn_manager, cortex_app_instance
 
+# Slack Socket Mode App
 def start_slack():
-    """Starts the Slack bot."""
     global CONN_MANAGER, CORTEX_APP
     CONN_MANAGER, CORTEX_APP = init()
     log.info("Starting Slack SocketModeHandler...")
@@ -441,12 +464,11 @@ health_app = Flask(__name__)
 
 @health_app.get("/healthcheck")
 def readiness_probe():
-    """A simple health check endpoint for the container service."""
     return "I'm ready!"
 
 if __name__ == "__main__":
-    # Start the dummy HTTP server in a separate thread
+    # Start dummy HTTP server in a thread
     Thread(target=lambda: health_app.run(host="0.0.0.0", port=8000)).start()
     
-    # Run the Slack bot in the main thread
+    # Run Slack bot in main thread
     start_slack()

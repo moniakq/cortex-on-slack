@@ -1,33 +1,12 @@
-"""
-This module provides a thread-safe class to manage and refresh Snowflake connections.
-"""
 import os
 import threading
 from datetime import datetime, timedelta
 import snowflake.connector
 
 class SnowflakeConnectionManager:
-    """
-    A thread-safe class to manage and refresh Snowflake connections.
-
-    This class handles the lifecycle of a Snowflake connection, ensuring that it is
-    always valid and refreshed periodically to prevent timeouts. It is designed
-    to be used in a multi-threaded environment, such as a web server or a
-    long-running application.
-    """
+    """A thread-safe class to manage and refresh Snowflake connections."""
 
     def __init__(self, logger, max_age_hours=4, initial_connection=None):
-        """
-        Initializes the connection manager.
-
-        Args:
-            logger: A logger instance for logging messages.
-            max_age_hours: The maximum age of a connection in hours before it is
-                           considered stale and needs to be refreshed.
-            initial_connection: An optional initial Snowflake connection to use.
-                                If not provided, a new connection will be created
-                                when `get_connection` is first called.
-        """
         self.log = logger
         self.log.info(f"Connection manager initialized with a max age of {max_age_hours} hours.")
         
@@ -53,18 +32,11 @@ class SnowflakeConnectionManager:
         self.max_age = timedelta(hours=max_age_hours)
 
     def _create_connection(self):
-        """
-        Creates and returns a new Snowflake connection using the SPCS token.
-
-        This method reads the Snowflake session token from the file specified by
-        `self.spcs_token_file` and uses it to create a new database connection.
-        """
+        """Creates and returns a new Snowflake connection using the SPCS token."""
         self.log.info("Creating a new Snowflake database connection...")
         
         if not os.path.exists(self.spcs_token_file):
             raise FileNotFoundError(f"SPCS token file not found at {self.spcs_token_file}.")
-        
-        # Read the SPCS token from the file system.
         with open(self.spcs_token_file, 'r') as f:
             token = f.read()
 
@@ -86,15 +58,8 @@ class SnowflakeConnectionManager:
             raise
 
     def get_connection(self):
-        """
-        Returns a valid connection, creating a new one if the old one is stale.
-
-        This method checks if the current connection is still valid based on its
-        age. If the connection is stale or does not exist, it creates a new one.
-        This method is thread-safe.
-        """
+        """Returns a valid connection, creating a new one if the old one is stale."""
         with self._lock:
-            # Check if the connection is stale.
             is_stale = (
                 self._connection is None or 
                 self._connection_timestamp is None or

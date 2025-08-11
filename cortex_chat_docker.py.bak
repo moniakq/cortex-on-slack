@@ -1,44 +1,32 @@
-"This module provides the CortexChat class to interact with the Snowflake Cortex Agent API."
 import requests
 import json
-import logging
-import sys
+# import generate_jwt # Assuming generate_jwt.py is in the same directory or accessible in PYTHONPATH
+from generate_jwt import JWTGenerator
+import logging # Import logging
+
+DEBUG = True 
 
 class CortexChat:
-    """
-    A class to interact with the Snowflake Cortex Agent API.
-
-    This class handles the communication with the Cortex Agent API, including
-    authentication, sending requests, and parsing the SSE (Server-Sent Events)
-    stream responses.
-    """
     def __init__(self,
             agent_url: str, 
             semantic_model: str,
             model: str, 
+            # We no longer need to pass the token or path here
             logger=None
         ):
-        """
-        Initializes the CortexChat instance.
-
-        Args:
-            agent_url: The URL of the Cortex Agent API.
-            semantic_model: The semantic model to be used by the agent.
-            model: The model to be used by the agent.
-            logger: An optional logger instance. If not provided, a new logger
-                    will be created.
-        """
+        # Logger setup remains the same
         if logger:
             self.logger = logger
         else:
             self.logger = logging.getLogger(self.__class__.__name__)
             if not self.logger.handlers:
                 self.logger.setLevel(logging.INFO)
-                handler = logging.StreamHandler(sys.stdout)
+                handler = logging.StreamHandler(sys.stdout) # Explicitly use stdout
                 formatter = logging.Formatter("%(name)s - %(levelname)s - %(message)s")
                 handler.setFormatter(formatter)
                 self.logger.addHandler(handler)
 
+        # The full URL to the Cortex Agent API
         self.agent_url = agent_url
         self.model = model
         self.semantic_model = semantic_model
@@ -46,12 +34,6 @@ class CortexChat:
     def _get_login_token(self) -> str:
         """
         Reads the fresh SPCS OAuth token from the file just before use.
-        
-        Returns:
-            The SPCS OAuth token as a string.
-            
-        Raises:
-            IOError: If the token file cannot be read.
         """
         token_path = "/snowflake/session/token"
         try:
@@ -59,19 +41,10 @@ class CortexChat:
                 return f.read()
         except Exception as e:
             self.logger.critical(f"FATAL: Could not read SPCS token file at {token_path}. Error: {e}", exc_info=True)
+            # This is a critical failure, so we re-raise the exception.
             raise IOError(f"Could not read SPCS token from {token_path}") from e
         
     def _retrieve_response(self, query: str) -> dict[str, any]:
-        """
-        Sends a query to the Cortex Agent API and retrieves the response.
-
-        Args:
-            query: The user's query to send to the agent.
-
-        Returns:
-            A dictionary containing the parsed response from the agent, or None
-            if an error occurred.
-        """
         self.logger.info("Preparing to send new request to Cortex Agent API.")
         
         fresh_token = self._get_login_token()
@@ -82,6 +55,7 @@ class CortexChat:
             "Content-Type": "application/json",
             "accept": "application/json",
         }
+        ## Local
         data = {
             "model": self.model,
             "messages": [
@@ -112,7 +86,7 @@ class CortexChat:
         response = requests.post(self.agent_url, headers=headers, json=data)
 
         request_id = response.headers.get('X-Snowflake-Request-Id', 'Not Found')
-        self.logger.debug(f"---- Agent Request ID: {request_id} -------ի")
+        self.logger.debug(f"---- Agent Request ID: {request_id} -------")
 
         self.logger.debug(f"--- Raw API Response Status Code: {response.status_code} ---")
         response_text_to_log = response.text[:1000] + ("..." if len(response.text) > 1000 else "")
@@ -124,17 +98,7 @@ class CortexChat:
             self.logger.error(f"Cortex Agent API Error: Status {response.status_code}, Message: {response.text}")
             return None
 
-    def _parse_delta_content(self, content_list: list) -> dict[str, any]:
-        """
-        Parses the content of a delta message from the SSE stream.
-
-        Args:
-            content_list: A list of content blocks from a delta message.
-
-        Returns:
-            A dictionary containing the parsed content, separated by type
-            (text, tool_use, tool_results).
-        """
+    def _parse_delta_content(self, content_list: list) -> dict[str, any]: # Renamed content to content_list
         result = {'text': '', 'tool_use': [], 'tool_results': []}
         for entry in content_list:
             entry_type = entry.get('type')
@@ -144,15 +108,6 @@ class CortexChat:
         return result
 
     def _process_sse_line(self, line: str) -> dict[str, any]:
-        """
-        Processes a single line from the SSE stream.
-
-        Args:
-            line: A single line from the SSE stream.
-
-        Returns:
-            A dictionary representing the processed line.
-        """
         if not line.startswith('data: '): return {}
         try:
             json_str = line[6:].strip()
@@ -174,23 +129,12 @@ class CortexChat:
             return {'type': 'error', 'message': f'Processing error: {e}'}
 
     def _parse_response(self, response: requests.Response) -> dict[str, any]:
-        """
-        Parses the entire SSE response stream from the Cortex Agent API.
-
-        Args:
-            response: The HTTP response object from the API.
-
-        Returns:
-            A dictionary containing the final aggregated response, including
-            text, SQL, and suggestions.
-        """
         accumulated = {'text': '', 'tool_use': [], 'tool_results': [], 'other': [], 'errors': []}
         self.logger.debug("Starting to parse SSE response stream...")
         for line in response.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
-                # The following line is useful for debugging SSE streams, but is very verbose.
-                # self.logger.debug(f"SSE Line: {decoded_line}")
+                # self.logger.debug(f"SSE Line: {decoded_line}") # Very verbose, enable if desperate
                 result = self._process_sse_line(decoded_line)
                 if result.get('type') == 'message':
                     content_data = result['content']
@@ -238,6 +182,8 @@ class CortexChat:
 
         if accumulated['errors']:
             self.logger.error(f"Errors detected during SSE response parsing: {accumulated['errors']}")
+            # Consider if final_text should indicate an error here
+            # final_text += " (An error occurred during response processing)"
         
         if final_text.strip().lower().startswith("i apologize"):
             self.logger.info("Detected 'I apologize' response. Replacing with custom message and link.")
@@ -250,15 +196,6 @@ class CortexChat:
         return {"text": final_text, "sql": sql, "suggestions": suggestions_list}
 
     def chat(self, query: str) -> dict[str, any]:
-        """
-        The main method to interact with the Cortex Agent.
-
-        Args:
-            query: The user's query.
-
-        Returns:
-            A dictionary containing the agent's response.
-        """
         self.logger.info(f"Received chat query: {query}")
         response_data = self._retrieve_response(query)
         if response_data is None:
